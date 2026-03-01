@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dapper;
 using HtmlAgilityPack;
+using HapHtmlDocument = HtmlAgilityPack.HtmlDocument;
 
 namespace PromptCrawlerApp;
 
@@ -60,7 +61,7 @@ internal sealed class PromptCrawler
                 break;
             }
 
-            var listDoc = new HtmlDocument();
+            var listDoc = new HapHtmlDocument();
             listDoc.LoadHtml(html);
 
             var detailUrls = ExtractDetailUrls(listDoc).ToList();
@@ -110,7 +111,7 @@ internal sealed class PromptCrawler
             return null;
         }
 
-        var doc = new HtmlDocument();
+        var doc = new HapHtmlDocument();
         doc.LoadHtml(html);
 
         return new PromptRecord
@@ -139,7 +140,7 @@ internal sealed class PromptCrawler
         }
     }
 
-    private IEnumerable<string> ExtractDetailUrls(HtmlDocument doc)
+    private IEnumerable<string> ExtractDetailUrls(HapHtmlDocument doc)
     {
         var nodes = doc.DocumentNode.SelectNodes("//a[@href]");
         if (nodes is null)
@@ -178,7 +179,7 @@ internal sealed class PromptCrawler
         return urls;
     }
 
-    private static bool HasNextPage(HtmlDocument doc, int currentPage)
+    private static bool HasNextPage(HapHtmlDocument doc, int currentPage)
     {
         var nextLink = doc.DocumentNode.SelectSingleNode(
             "//a[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'next') or contains(normalize-space(text()), '下一页')]");
@@ -190,14 +191,14 @@ internal sealed class PromptCrawler
         return Regex.IsMatch(doc.DocumentNode.InnerHtml, $@"page\s*=\s*{currentPage + 1}\b", RegexOptions.IgnoreCase);
     }
 
-    private static string ReadTitle(HtmlDocument doc)
+    private static string ReadTitle(HapHtmlDocument doc)
     {
         var node = doc.DocumentNode.SelectSingleNode("//h1")
                    ?? doc.DocumentNode.SelectSingleNode("//title");
         return HtmlEntity.DeEntitize(node?.InnerText?.Trim() ?? string.Empty);
     }
 
-    private static string ReadSummary(HtmlDocument doc)
+    private static string ReadSummary(HapHtmlDocument doc)
     {
         var metaDesc = doc.DocumentNode.SelectSingleNode("//meta[@name='description']")?.GetAttributeValue("content", "");
         if (!string.IsNullOrWhiteSpace(metaDesc))
@@ -211,7 +212,7 @@ internal sealed class PromptCrawler
         return HtmlEntity.DeEntitize(p?.InnerText?.Trim() ?? string.Empty);
     }
 
-    private static string ReadPromptText(HtmlDocument doc)
+    private static string ReadPromptText(HapHtmlDocument doc)
     {
         var codeNode = doc.DocumentNode.SelectSingleNode("//pre")
                       ?? doc.DocumentNode.SelectSingleNode("//code")
@@ -236,7 +237,7 @@ internal sealed class PromptCrawler
         return string.IsNullOrWhiteSpace(extracted) ? string.Empty : extracted;
     }
 
-    private static string ReadTags(HtmlDocument doc)
+    private static string ReadTags(HapHtmlDocument doc)
     {
         var tags = doc.DocumentNode
             .SelectNodes("//a[contains(@href,'tag') or contains(@href,'category')] | //span[contains(@class,'tag')]")
