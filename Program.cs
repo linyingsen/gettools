@@ -298,7 +298,7 @@ internal sealed class PromptCrawler
             ?.Select(n => HtmlEntity.DeEntitize(n.InnerText.Trim()))
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList() ?? [];
+            .ToList() ?? new List<string>();
 
         return tags.Count == 0 ? string.Empty : string.Join(',', tags);
     }
