@@ -43,7 +43,7 @@ dotnet run -- --conn "Server=.;Database=ai;Trusted_Connection=True;TrustServerCe
 
 ## 5. 依赖
 
-- .NET 8
+- .NET 7.0
 - NuGet 包：
   - `HtmlAgilityPack`
   - `Dapper`
