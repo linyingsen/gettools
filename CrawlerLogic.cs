@@ -48,37 +48,30 @@ internal sealed class PromptCrawler
     {
         var result = new Dictionary<string, PromptRecord>(StringComparer.OrdinalIgnoreCase);
 
-        var visitedListPages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var pendingListPages = new Queue<Uri>();
-        pendingListPages.Enqueue(new Uri(_baseUri, "/prompt"));
-
-        const int maxListPages = 300;
-        var processed = 0;
-
-        while (pendingListPages.Count > 0 && processed < maxListPages)
+        var page = 1;
+        while (true)
         {
-            var listUri = pendingListPages.Dequeue();
-            var listKey = NormalizeUrl(listUri.ToString());
-            if (!visitedListPages.Add(listKey))
-            {
-                continue;
-            }
-
-            processed++;
+            var listUri = BuildListPageUri(page);
             _log($"抓取列表页：{listUri}");
 
             var html = await TryGetHtmlAsync(listUri);
             if (string.IsNullOrWhiteSpace(html))
             {
-                _log("列表页为空或访问失败，跳过。") ;
-                continue;
+                _log("列表页为空或访问失败，停止翻页。");
+                break;
             }
 
             var listDoc = new HapHtmlDocument();
             listDoc.LoadHtml(html);
 
-            var detailUrls = ExtractDetailUrls(listDoc, html).ToList();
-            _log($"列表页提取到 {detailUrls.Count} 个详情链接。") ;
+            var detailUrls = ExtractDetailUrls(listDoc).ToList();
+            if (detailUrls.Count == 0)
+            {
+                _log("当前页未发现详情链接，停止翻页。");
+                break;
+            }
+
+            _log($"列表页提取到 {detailUrls.Count} 个详情链接。");
 
             foreach (var detailUrl in detailUrls)
             {
@@ -95,23 +88,20 @@ internal sealed class PromptCrawler
                 }
             }
 
-            foreach (var nextListPage in ExtractListPageUrls(listDoc, html))
+            if (!HasNextPage(listDoc, page))
             {
-                var nextKey = NormalizeUrl(nextListPage);
-                if (visitedListPages.Contains(nextKey))
-                {
-                    continue;
-                }
-
-                pendingListPages.Enqueue(new Uri(nextListPage));
+                break;
             }
 
-            await Task.Delay(300);
+            page++;
+            await Task.Delay(500);
         }
 
-        _log($"列表页处理完成：共处理 {processed} 页。") ;
         return result.Values.ToList();
     }
+
+    private Uri BuildListPageUri(int page)
+        => page <= 1 ? new Uri(_baseUri, "/prompt") : new Uri(_baseUri, $"/prompt?page={page}");
 
     private async Task<PromptRecord?> CrawlDetailAsync(string detailUrl, string sourcePageUrl)
     {
@@ -124,22 +114,12 @@ internal sealed class PromptCrawler
         var doc = new HapHtmlDocument();
         doc.LoadHtml(html);
 
-        var title = ReadTitle(doc);
-        var summary = ReadSummary(doc);
-        var promptText = ReadPromptText(doc);
-
-        // 如果命中的是列表页或内容异常短，则放弃（避免把列表页当成详情页写入）。
-        if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(promptText))
-        {
-            return null;
-        }
-
         return new PromptRecord
         {
             PromptUrl = detailUrl,
-            Title = title,
-            Summary = summary,
-            PromptText = promptText,
+            Title = ReadTitle(doc),
+            Summary = ReadSummary(doc),
+            PromptText = ReadPromptText(doc),
             Tags = ReadTags(doc),
             SourcePageUrl = sourcePageUrl,
             RawHtml = html,
@@ -160,21 +140,35 @@ internal sealed class PromptCrawler
         }
     }
 
-    private IEnumerable<string> ExtractDetailUrls(HapHtmlDocument doc, string html)
+    private IEnumerable<string> ExtractDetailUrls(HapHtmlDocument doc)
     {
-        var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var nodes = doc.DocumentNode.SelectNodes("//a[@href]");
+        if (nodes is null)
+        {
+            return Enumerable.Empty<string>();
+        }
 
-        var nodes = doc.DocumentNode.SelectNodes("//a[@href]") ?? Enumerable.Empty<HtmlNode>();
+        var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var node in nodes)
         {
             var href = node.GetAttributeValue("href", string.Empty).Trim();
+            if (string.IsNullOrEmpty(href))
+            {
+                continue;
+            }
+
             var absolute = ToAbsoluteUrl(href);
             if (absolute is null)
             {
                 continue;
             }
 
-            if (!IsPromptDetailUrl(absolute))
+            if (!absolute.Contains("/prompt/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (absolute.Contains('#') || absolute.EndsWith("/prompt", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -182,67 +176,26 @@ internal sealed class PromptCrawler
             urls.Add(absolute);
         }
 
-        // 兜底：有些页面列表是前端渲染，详情链接只在 JSON/脚本里。
-        foreach (Match m in Regex.Matches(html, "(?:https?:\\/\\/ai\\.codefather\\.cn)?\\/prompt\\/[^\"'\\s<>?#]+", RegexOptions.IgnoreCase))
-        {
-            var raw = m.Value.Replace("\\/", "/");
-            var absolute = ToAbsoluteUrl(raw);
-            if (absolute is not null && IsPromptDetailUrl(absolute))
-            {
-                urls.Add(absolute);
-            }
-        }
-
         return urls;
     }
 
-    private IEnumerable<string> ExtractListPageUrls(HapHtmlDocument doc, string html)
+    private static bool HasNextPage(HapHtmlDocument doc, int currentPage)
     {
-        var pages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        var nodes = doc.DocumentNode.SelectNodes("//a[@href]") ?? Enumerable.Empty<HtmlNode>();
-        foreach (var node in nodes)
+        var nextLink = doc.DocumentNode.SelectSingleNode(
+            "//a[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'next') or contains(normalize-space(text()), '下一页')]");
+        if (nextLink is not null)
         {
-            var href = node.GetAttributeValue("href", string.Empty).Trim();
-            var absolute = ToAbsoluteUrl(href);
-            if (absolute is null)
-            {
-                continue;
-            }
-
-            if (!IsPromptListUrl(absolute))
-            {
-                continue;
-            }
-
-            pages.Add(NormalizeUrl(absolute));
+            return true;
         }
 
-        // 兜底：页面脚本中提取 /prompt?page=N。
-        foreach (Match m in Regex.Matches(html, "(?:https?:\\/\\/ai\\.codefather\\.cn)?\\/prompt\\?[^\"'\\s<>]*page=\\d+[^\"'\\s<>]*", RegexOptions.IgnoreCase))
-        {
-            var raw = m.Value.Replace("\\/", "/");
-            var absolute = ToAbsoluteUrl(raw);
-            if (absolute is not null && IsPromptListUrl(absolute))
-            {
-                pages.Add(NormalizeUrl(absolute));
-            }
-        }
-
-        return pages;
+        return Regex.IsMatch(doc.DocumentNode.InnerHtml, $@"page\s*=\s*{currentPage + 1}\b", RegexOptions.IgnoreCase);
     }
 
     private static string ReadTitle(HapHtmlDocument doc)
     {
         var node = doc.DocumentNode.SelectSingleNode("//h1")
-                   ?? doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']")
                    ?? doc.DocumentNode.SelectSingleNode("//title");
-
-        var content = node?.Name == "meta"
-            ? node.GetAttributeValue("content", string.Empty)
-            : node?.InnerText;
-
-        return HtmlEntity.DeEntitize((content ?? string.Empty).Trim());
+        return HtmlEntity.DeEntitize(node?.InnerText?.Trim() ?? string.Empty);
     }
 
     private static string ReadSummary(HapHtmlDocument doc)
@@ -263,16 +216,12 @@ internal sealed class PromptCrawler
     {
         var codeNode = doc.DocumentNode.SelectSingleNode("//pre")
                       ?? doc.DocumentNode.SelectSingleNode("//code")
-                      ?? doc.DocumentNode.SelectSingleNode("//textarea")
-                      ?? doc.DocumentNode.SelectSingleNode("//*[contains(@class,'prompt') and not(self::script)]")
-                      ?? doc.DocumentNode.SelectSingleNode("//*[contains(@class,'markdown') and not(self::script)]")
-                      ?? doc.DocumentNode.SelectSingleNode("//article")
-                      ?? doc.DocumentNode.SelectSingleNode("//main");
+                      ?? doc.DocumentNode.SelectSingleNode("//textarea");
 
         if (codeNode is not null)
         {
             var text = HtmlEntity.DeEntitize(codeNode.InnerText).Trim();
-            if (!string.IsNullOrWhiteSpace(text) && text.Length > 20)
+            if (!string.IsNullOrWhiteSpace(text))
             {
                 return text;
             }
@@ -308,7 +257,7 @@ internal sealed class PromptCrawler
             var candidates = new List<string>();
             Traverse(doc.RootElement, candidates);
 
-            return candidates.Where(x => x.Length > 50)
+            return candidates.Where(x => x.Length > 30)
                 .OrderByDescending(x => x.Length)
                 .FirstOrDefault() ?? string.Empty;
         }
@@ -328,7 +277,7 @@ internal sealed class PromptCrawler
                     if (prop.Value.ValueKind == JsonValueKind.String)
                     {
                         var name = prop.Name.ToLowerInvariant();
-                        if (name.Contains("prompt") || name.Contains("content") || name.Contains("text") || name.Contains("description"))
+                        if (name.Contains("prompt") || name.Contains("content") || name.Contains("text"))
                         {
                             collector.Add(prop.Value.GetString() ?? string.Empty);
                         }
@@ -348,78 +297,23 @@ internal sealed class PromptCrawler
         }
     }
 
-    private bool IsPromptListUrl(string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        if (!uri.Host.Equals(_baseUri.Host, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var path = uri.AbsolutePath.TrimEnd('/');
-        return path.Equals("/prompt", StringComparison.OrdinalIgnoreCase) && uri.Query.Contains("page=", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private bool IsPromptDetailUrl(string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        if (!uri.Host.Equals(_baseUri.Host, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var path = uri.AbsolutePath.TrimEnd('/');
-        if (!path.StartsWith("/prompt/", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        // 排除分页链接、搜索等非详情。
-        return !uri.Query.Contains("page=", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeUrl(string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return url;
-        }
-
-        var builder = new UriBuilder(uri)
-        {
-            Fragment = string.Empty
-        };
-
-        return builder.Uri.ToString().TrimEnd('/');
-    }
-
     private string? ToAbsoluteUrl(string href)
     {
-        if (string.IsNullOrWhiteSpace(href) || href.StartsWith("javascript", StringComparison.OrdinalIgnoreCase))
+        if (href.StartsWith("javascript", StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
 
-        var normalizedHref = href.Replace("\\/", "/");
-
-        if (Uri.TryCreate(normalizedHref, UriKind.Absolute, out var absolute))
+        if (Uri.TryCreate(href, UriKind.Absolute, out var absolute))
         {
             return absolute.Host.Equals(_baseUri.Host, StringComparison.OrdinalIgnoreCase)
-                ? NormalizeUrl(absolute.ToString())
+                ? absolute.ToString()
                 : null;
         }
 
-        if (Uri.TryCreate(_baseUri, normalizedHref, out var relative))
+        if (Uri.TryCreate(_baseUri, href, out var relative))
         {
-            return NormalizeUrl(relative.ToString());
+            return relative.ToString();
         }
 
         return null;

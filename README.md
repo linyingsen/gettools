@@ -41,9 +41,6 @@ Server=.;Database=ai;Trusted_Connection=True;TrustServerCertificate=True
 - 提取每条详情链接（`/prompt/...`）
 - 进入详情页采集：标题、摘要、提示词正文、标签
 - 使用 SQL `MERGE` 按 `prompt_url` 做 Upsert（存在则更新，不存在则插入）
-- 分页抓取采用“发现并继续抓取分页链接”的方式，不再依赖单一“下一页”按钮文本，适配几十页场景。
-- 详情链接增加脚本(JSON)兜底提取，避免仅前端渲染时漏抓。
-- 详情正文增加多种容器与 `__NEXT_DATA__` 兜底提取，解决只抓到列表内容的问题。
 
 ## 5. 项目结构
 
